@@ -2,15 +2,12 @@ const std = @import("std");
 const log = std.log.scoped(.zgpu);
 
 pub const WebgpuBackend = enum {
-    dawn,
     wgpu,
 };
 
 const default_options = struct {
     const uniforms_buffer_size = 4 * 1024 * 1024;
-    const webgpu_backend = WebgpuBackend.dawn;
-    const dawn_skip_validation = false;
-    const dawn_allow_unsafe_apis = false;
+    const webgpu_backend = WebgpuBackend.wgpu;
     const buffer_pool_size = 256;
     const texture_pool_size = 256;
     const texture_view_pool_size = 256;
@@ -39,16 +36,6 @@ pub fn build(b: *std.Build) void {
             "uniforms_buffer_size",
             "Set uniforms buffer size",
         ) orelse default_options.uniforms_buffer_size,
-        .dawn_skip_validation = b.option(
-            bool,
-            "dawn_skip_validation",
-            "Disable Dawn validation",
-        ) orelse default_options.dawn_skip_validation,
-        .dawn_allow_unsafe_apis = b.option(
-            bool,
-            "dawn_allow_unsafe_apis",
-            "Allow unsafe WebGPU APIs (e.g. timestamp queries)",
-        ) orelse default_options.dawn_allow_unsafe_apis,
         .buffer_pool_size = b.option(
             u32,
             "buffer_pool_size",
@@ -123,7 +110,9 @@ pub fn build(b: *std.Build) void {
     });
 
     const root_mod = b.addModule("root", .{
-        .root_source_file = if (options.webgpu_backend == .dawn) b.path("src/dawn/zgpu.zig") else b.path("src/wgpu_native/zgpu.zig"),
+        .root_source_file = switch (options.webgpu_backend) {
+            .wgpu => b.path("src/wgpu_native/zgpu.zig"),
+        },
         .imports = &.{
             .{ .name = "zgpu_options", .module = options_module },
             .{ .name = "zpool", .module = b.dependency("zpool", .{}).module("root") },
@@ -134,51 +123,66 @@ pub fn build(b: *std.Build) void {
     });
     root_mod.addIncludePath(b.path("src"));
 
-    const webgpu_lib = if (options.webgpu_backend == .dawn) zdawn: {
-        const zdawn = b.addLibrary(.{
-            .name = "zdawn",
-            .root_module = b.createModule(.{
-                .target = target,
+    const webgpu_lib = switch (options.webgpu_backend) {
+        .wgpu => wgpu: {
+            // TODO: add ABI checks for all the Android variants.
+            const arch = switch (target.result.cpu.arch) {
+                .aarch64 => "aarch64",
+                .x86 => "i686",
+                .x86_64 => "x86_64",
+                else => std.debug.panic("unsupported zgpu architecture: {any}", .{@tagName(target.result.cpu.arch)}),
+            };
+            const os = switch (target.result.os.tag) {
+                .macos => "macos",
+                .ios => "ios",
+                .windows => "windows",
+                else => std.debug.panic("unsupported zgpu operating system: {any}", .{@tagName(target.result.os.tag)}),
+            };
+            var libc: [:0]const u8 = "";
+            if (target.result.os.tag == .windows) {
+                libc = "_gnu";
+            }
+
+            const wgpu_dep_name = std.mem.concat(b.allocator, u8, &[_][]const u8{
+                "wgpu_",
+                os,
+                "_",
+                arch,
+                libc,
+                "_release",
+            }) catch std.debug.panic("unable to allocate for wgpu-native dependency name", .{});
+
+            const wgpu_dep = b.lazyDependency(wgpu_dep_name, .{}) orelse
+                std.debug.panic("could not load wgpu-native dependency {s}", .{wgpu_dep_name});
+
+            const cwgpu = b.addTranslateC(.{
+                .root_source_file = wgpu_dep.path("include/webgpu/wgpu.h"),
                 .optimize = optimize,
-                .link_libc = true,
-                .link_libcpp = target.result.abi != .msvc,
-            }),
-        });
-        b.installArtifact(zdawn);
-
-        linkSystemDeps(b, zdawn);
-        addLibraryPathsTo(zdawn);
-
-        zdawn.root_module.addIncludePath(b.path("libs/dawn/include"));
-        zdawn.root_module.addIncludePath(b.path("src"));
-
-        zdawn.root_module.addCSourceFile(.{
-            .file = b.path("src/dawn/dawn.cpp"),
-            .flags = &.{ "-std=c++17", "-fno-sanitize=undefined" },
-        });
-        // dawn_proc.c removed - prebuilt dawn.a already contains dawn_proc.cpp.o
-        break :zdawn zdawn;
-    } else wgpu: {
-        const zwgpu = b.addLibrary(.{
-            .name = "zwgpu",
-            .root_module = b.createModule(.{
                 .target = target,
-                .optimize = optimize,
-                .link_libc = true,
-                .link_libcpp = target.result.abi != .msvc,
-            }),
-        });
-        b.installArtifact(zwgpu);
+            });
+            cwgpu.addIncludePath(wgpu_dep.path("include/webgpu"));
+            const cwgpu_mod = cwgpu.createModule();
 
-        const wgpu_dep = b.lazyDependency("wgpu_macos_aarch64_release", .{}) orelse return;
+            const zwgpu = b.addLibrary(.{
+                .name = "zwgpu",
+                .root_module = b.createModule(.{
+                    .target = target,
+                    .optimize = optimize,
+                    .link_libc = true,
+                    .link_libcpp = target.result.abi != .msvc,
+                }),
+            });
+            b.installArtifact(zwgpu);
 
-        linkSystemDeps(b, zwgpu);
+            linkSystemDeps(b, zwgpu);
+            zwgpu.root_module.addObjectFile(wgpu_dep.path("lib/libwgpu_native.a"));
+            zwgpu.root_module.addImport("cwgpu", cwgpu_mod);
 
-        zwgpu.root_module.addObjectFile(wgpu_dep.path("libwgpu_native.a"));
+            root_mod.addObjectFile(wgpu_dep.path("lib/libwgpu_native.a"));
+            root_mod.addImport("cwgpu", cwgpu_mod);
 
-        zwgpu.root_module.addIncludePath(wgpu_dep.path("include/wgpu/"));
-        zwgpu.root_module.addIncludePath(wgpu_dep.path("include/webgpu"));
-        break :wgpu zwgpu;
+            break :wgpu zwgpu;
+        },
     };
     const test_step = b.step("test", "Run zgpu tests");
 
@@ -186,17 +190,16 @@ pub fn build(b: *std.Build) void {
         .name = "zgpu-tests",
         .root_module = root_mod,
     });
-    tests.root_module.addIncludePath(b.path("libs/dawn/include"));
     tests.root_module.addIncludePath(b.path("src"));
     tests.root_module.linkLibrary(webgpu_lib);
     linkSystemDeps(b, tests);
-    addLibraryPathsTo(tests);
     b.installArtifact(tests);
 
     test_step.dependOn(&b.addRunArtifact(tests).step);
 }
 
 pub fn linkSystemDeps(b: *std.Build, compile_step: *std.Build.Step.Compile) void {
+    var mod = compile_step.root_module;
     switch (compile_step.rootModuleTarget().os.tag) {
         .windows => {
             if (b.lazyDependency("system_sdk", .{})) |system_sdk| {
@@ -206,54 +209,13 @@ pub fn linkSystemDeps(b: *std.Build, compile_step: *std.Build.Step.Compile) void
             compile_step.root_module.linkSystemLibrary("dxguid", .{});
         },
         .macos => {
-            if (b.lazyDependency("system_sdk", .{})) |system_sdk| {
-                compile_step.root_module.addLibraryPath(system_sdk.path("macos12/usr/lib"));
-                compile_step.root_module.addFrameworkPath(system_sdk.path("macos12/System/Library/Frameworks"));
-            }
-            compile_step.root_module.linkSystemLibrary("objc", .{});
-            compile_step.root_module.linkFramework("Metal", .{});
-            compile_step.root_module.linkFramework("CoreGraphics", .{});
-            compile_step.root_module.linkFramework("Foundation", .{});
-            compile_step.root_module.linkFramework("IOKit", .{});
-            compile_step.root_module.linkFramework("IOSurface", .{});
-            compile_step.root_module.linkFramework("QuartzCore", .{});
-        },
-        else => {},
-    }
-}
-
-pub fn addLibraryPathsTo(compile_step: *std.Build.Step.Compile) void {
-    const b = compile_step.step.owner;
-    const target = compile_step.rootModuleTarget();
-    switch (target.os.tag) {
-        .windows => {
-            if (b.lazyDependency("dawn_x86_64_windows_gnu", .{})) |dawn_prebuilt| {
-                compile_step.root_module.addLibraryPath(dawn_prebuilt.path(""));
-            }
-        },
-        .linux => {
-            if (target.cpu.arch.isX86()) {
-                if (b.lazyDependency("dawn_x86_64_linux_gnu", .{})) |dawn_prebuilt| {
-                    compile_step.root_module.addLibraryPath(dawn_prebuilt.path(""));
-                }
-            } else if (target.cpu.arch.isAARCH64()) {
-                if (b.lazyDependency("dawn_aarch64_linux_gnu", .{})) |dawn_prebuilt| {
-                    compile_step.root_module.addLibraryPath(dawn_prebuilt.path(""));
-                }
-            }
-        },
-        .macos => {
-            if (target.cpu.arch.isX86()) {
-                if (b.lazyDependency("dawn_x86_64_macos", .{})) |dawn_prebuilt| {
-                    compile_step.root_module.addLibraryPath(dawn_prebuilt.path(""));
-                }
-            } else if (target.cpu.arch.isAARCH64()) {
-                // if (b.lazyDependency("dawn_aarch64_macos", .{})) |dawn_prebuilt| {
-                //     compile_step.addLibraryPath(dawn_prebuilt.path(""));
-                // }
-                const dawn_darwin = b.dependency("dawn_darwin", .{});
-                compile_step.root_module.addObjectFile(dawn_darwin.path("dawn.a"));
-            }
+            mod.linkSystemLibrary("objc", .{});
+            mod.linkFramework("Metal", .{});
+            mod.linkFramework("CoreGraphics", .{});
+            mod.linkFramework("Foundation", .{});
+            mod.linkFramework("IOKit", .{});
+            mod.linkFramework("IOSurface", .{});
+            mod.linkFramework("QuartzCore", .{});
         },
         else => {},
     }
@@ -264,7 +226,7 @@ pub fn checkTargetSupported(target: std.Target) bool {
         .windows => target.cpu.arch.isX86() and target.abi.isGnu(),
         .linux => (target.cpu.arch.isX86() or target.cpu.arch.isAARCH64()) and target.abi.isGnu(),
         .macos => blk: {
-            if (!target.cpu.arch.isX86() and !target.cpu.arch.isAARCH64()) break :blk false;
+            if (!target.cpu.arch.isAARCH64()) break :blk false;
 
             // If min. target macOS version is lesser than the min version we have available, then
             // our Dawn binary is incompatible with the target.

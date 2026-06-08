@@ -3,7 +3,7 @@ const zgpu_options = @import("zgpu_options");
 
 const backend = zgpu_options.webgpu_backend;
 
-const WGPU_STRLEN = std.math.maxInt(usize);
+pub const WGPU_STRLEN = std.math.maxInt(usize);
 
 const bit_copy_src: u64 = 0x0000000000000001;
 const bit_copy_dst: u64 = 0x0000000000000002;
@@ -24,13 +24,11 @@ const WgpuTextureUsage = packed struct(u32) {
     _padding: u25 = 0,
 };
 
-pub const TextureUsage = if (backend == .dawn) u64 else WgpuTextureUsage;
+pub const TextureUsage = WgpuTextureUsage;
 
 fn withBits(bits: u64) TextureUsage {
-    if (backend == .dawn) {
-        return @as(TextureUsage, bits);
-    } else {
-        return WgpuTextureUsage{
+    return switch (backend) {
+        .wgpu => WgpuTextureUsage{
             .copy_src = (bits & bit_copy_src) != 0,
             .copy_dst = (bits & bit_copy_dst) != 0,
             .texture_binding = (bits & bit_texture_binding) != 0,
@@ -39,24 +37,24 @@ fn withBits(bits: u64) TextureUsage {
             .transient_attachment = (bits & bit_transient_attachment) != 0,
             .storage_attachment = (bits & bit_storage_attachment) != 0,
             ._padding = 0,
-        };
-    }
+        },
+    };
 }
 
 fn bitsOf(value: TextureUsage) u64 {
-    if (backend == .dawn) {
-        return @as(u64, value);
-    } else {
-        const usage = @as(WgpuTextureUsage, value);
-        var result: u64 = 0;
-        if (usage.copy_src) result |= bit_copy_src;
-        if (usage.copy_dst) result |= bit_copy_dst;
-        if (usage.texture_binding) result |= bit_texture_binding;
-        if (usage.storage_binding) result |= bit_storage_binding;
-        if (usage.render_attachment) result |= bit_render_attachment;
-        if (usage.transient_attachment) result |= bit_transient_attachment;
-        if (usage.storage_attachment) result |= bit_storage_attachment;
-        return result;
+    switch (.backend) {
+        .wgpu => {
+            const usage = @as(WgpuTextureUsage, value);
+            var result: u64 = 0;
+            if (usage.copy_src) result |= bit_copy_src;
+            if (usage.copy_dst) result |= bit_copy_dst;
+            if (usage.texture_binding) result |= bit_texture_binding;
+            if (usage.storage_binding) result |= bit_storage_binding;
+            if (usage.render_attachment) result |= bit_render_attachment;
+            if (usage.transient_attachment) result |= bit_transient_attachment;
+            if (usage.storage_attachment) result |= bit_storage_attachment;
+            return result;
+        },
     }
 }
 

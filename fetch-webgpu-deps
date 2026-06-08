@@ -1,0 +1,34 @@
+#!/usr/bin/env bash
+VERSION='v29.0.0.0'
+PREFIX="https://github.com/gfx-rs/wgpu-native/releases/download/${VERSION}"
+# NOTE: Leaving out old macOS targets because there's very little reason
+# to continue supporting them.
+TARGETS=(
+	'ios-aarch64'
+	'linux-aarch64'
+	'linux-x86_64'
+	'macos-aarch64'
+	'windows-aarch64-msvc'
+	'windows-i686-msvc'
+	'windows-x86_64-gnu'
+
+  # TODO:
+	# 'android-aarch64'
+	# 'android-armv7'
+	# 'android-i686'
+	# 'android-x86_64'
+	# 'ios-aarch64-simulator'
+
+	# TODO: figure out if this is supported in the first place.
+	# 'windows-x86_64-msvc'
+	
+	# Dying targets:
+	# 'ios-x86_64-simulator'
+	# 'macos-x86_64'
+)
+
+for target in "${TARGETS[@]}"
+do
+	dep_name="${target//-/_}"
+	zig fetch --save="wgpu_${dep_name}_release" "${PREFIX}/wgpu-${target}-release.zip"
+done
